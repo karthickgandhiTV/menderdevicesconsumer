@@ -23,7 +23,7 @@ func main() {
 
 	js, err := nats.SetupJetStream(nc)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err) 
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

@@ -18,8 +18,18 @@ func handleRequest(js jetstream.JetStream, msg jetstream.Msg) {
 		if err != nil {
 			log.Printf("Failed to fetch devices: %v", err)
 			msg.Ack()
+			return
 		}
 		return
 	}
 
+	if msg.Subject() == "device.preauthorizeDevice.>" {
+		_, err := device.PreauthorizeDevice(ctx, js, msg)
+		if err != nil {
+			log.Printf("Failed to fetch devices: %v", err)
+			msg.Ack()
+			return
+		}
+		return
+	}
 }
