@@ -10,7 +10,7 @@ import (
 )
 
 func handleRequest(js jetstream.JetStream, msg jetstream.Msg) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	if msg.Subject() == "device.listDevice.>" {
@@ -27,6 +27,16 @@ func handleRequest(js jetstream.JetStream, msg jetstream.Msg) {
 		_, err := device.PreauthorizeDevice(ctx, js, msg)
 		if err != nil {
 			log.Printf("Failed to fetch devices: %v", err)
+			msg.Ack()
+			return
+		}
+		return
+	}
+
+	if msg.Subject() == "device.uploadArtifact.>" {
+		_, err := device.UploadArtifact(ctx, js, msg)
+		if err != nil {
+			log.Printf("Failed to upload Artifact: %v", err)
 			msg.Ack()
 			return
 		}

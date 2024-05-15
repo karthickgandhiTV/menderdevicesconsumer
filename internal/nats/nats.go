@@ -34,7 +34,7 @@ func InitStreamAndConsumer(nc *nats.Conn, ctx context.Context, js jetstream.JetS
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Name:           "mender_device",
 		Durable:        "mender_device",
-		FilterSubjects: []string{"device.listDevice.>", "device.preauthorizeDevice.>"},
+		FilterSubjects: []string{"device.listDevice.>", "device.preauthorizeDevice.>", "device.uploadArtifact.>"},
 	})
 	if err != nil {
 		log.Fatal(err)
