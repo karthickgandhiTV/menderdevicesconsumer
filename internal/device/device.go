@@ -32,11 +32,11 @@ func GetDeviceList(ctx context.Context, js jetstream.JetStream, msg jetstream.Ms
 		log.Printf("Failed to authenticate: %v", err)
 		return "", err
 	}
-	// api := api.GetInstance()
+	api := api.GetInstance()
 	client := http.NewClient()
 
-	apiURL := "https://" + creds.Domain + "/api/management/v1/deployments/artifacts/directupload"
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
+	apiURL := "https://" + creds.Domain + api.API.V2uriDevices
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		log.Printf("Failed to create API request: %v", err)
 		return "", err
@@ -66,6 +66,7 @@ func GetDeviceList(ctx context.Context, js jetstream.JetStream, msg jetstream.Ms
 
 type DeviceData struct {
 	MAC string `json:"mac"`
+	DyngateId string `json:"dyngateId`
 }
 
 type PreauthorizeDeviceRequest struct {
@@ -149,19 +150,36 @@ func PreauthorizeDevice(ctx context.Context, js jetstream.JetStream, msg jetstre
 	return string(body), nil
 }
 
-func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
-	containerName := "karthick"
-	blobName := "core-image-base-raspberrypi3-20240513103357.mender"
+type Artifact struct {
+	ContainerName string
+	BlobName      string
+}
 
-	request, err := ParseCredentials(msg)
+type UploadArtifactRequest struct {
+	AuthRequest  auth.Request
+	BlobMetadata Artifact
+}
+
+func ParseUploadArtifactRequest(msg jetstream.Msg) (*UploadArtifactRequest, error) {
+	var request UploadArtifactRequest
+	err := json.Unmarshal(msg.Data(), &request)
+	if err != nil {
+		log.Printf("Failed to parse credentials: %v", err)
+		return nil, err
+	}
+	return &request, nil
+}
+
+func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
+	request, err := ParseUploadArtifactRequest(msg)
 	if err != nil {
 		log.Printf("Failed to parse credentials: %v", err)
 		return "", err
 	}
 
-	log.Print(request.Domain)
-	log.Printf("Received Request: %s", request.RequestId)
-	token, err := request.AuthenticateWithContext(ctx)
+	log.Print(request.AuthRequest.Domain)
+	log.Printf("Received Request: %s", request.AuthRequest.RequestId)
+	token, err := request.AuthRequest.AuthenticateWithContext(ctx)
 	if err != nil {
 		log.Printf("Failed to authenticate: %v", err)
 		return "", err
@@ -181,7 +199,7 @@ func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.M
 		return "", err
 	}
 
-	downloadResponse, err := serviceClient.DownloadStream(ctx, containerName, blobName, nil)
+	downloadResponse, err := serviceClient.DownloadStream(ctx, request.BlobMetadata.ContainerName, request.BlobMetadata.BlobName, nil)
 	if err != nil {
 		log.Printf("Failed to start blob download: %v", err)
 		return "", err
@@ -200,14 +218,14 @@ func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.M
 			writer.CloseWithError(err)
 			return
 		}
-		_, err = metaPart.Write([]byte("Your artifact description here"))
+		_, err = metaPart.Write([]byte("Artifact description"))
 		if err != nil {
 			log.Printf("Failed to write to metadata part: %v", err)
 			writer.CloseWithError(err)
 			return
 		}
 
-		artifactPart, err := multipartWriter.CreateFormFile("artifact", blobName)
+		artifactPart, err := multipartWriter.CreateFormFile("artifact", request.BlobMetadata.ContainerName)
 		if err != nil {
 			log.Printf("Failed to create form file for artifact: %v", err)
 			writer.CloseWithError(err)
@@ -228,18 +246,16 @@ func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.M
 	}()
 
 	client := http.NewClient()
-	apiURL := "https://" + request.Domain + "/api/management/v1/deployments/artifacts"
+	apiURL := "https://" + request.AuthRequest.Domain + "/api/management/v1/deployments/artifacts"
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reader)
 	if err != nil {
 		log.Printf("Failed to create request: %v", err)
 		return "", err
 	}
 
-	// Set the content type with the correct boundary
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+token)
-
-	// Perform the request
+	log.Print("Sending request")
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("Failed to send request: %v", err)
@@ -247,9 +263,9 @@ func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.M
 	}
 	defer resp.Body.Close()
 
-	// Read the response body for debugging
 	responseBody, _ := io.ReadAll(resp.Body)
-	log.Printf("Server response: %s", responseBody)
+	log.Print(string(responseBody))
+	log.Printf("StatusCode: %v", resp.StatusCode)
 
 	if resp.StatusCode != 201 {
 		log.Printf("Failed to upload blob, server responded with status: %v", resp.StatusCode)
