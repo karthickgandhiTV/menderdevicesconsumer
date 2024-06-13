@@ -15,7 +15,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	nc, err := nats.Connect(cfg.NATSURL, cfg.NATSCredentials)
+	nc, err := nats.Connect(cfg.NATSURL)
 	if err != nil {
 		log.Fatalf("Failed to connect to NATS: %v", err)
 	}

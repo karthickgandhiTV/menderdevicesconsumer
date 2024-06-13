@@ -12,10 +12,10 @@ type Config struct {
 
 func Load() (*Config, error) {
 	var cfg Config
-	cfg.NATSURL = "connect.ngs.global"
-	cfg.NATSCredentials = "NGS-Karthick-karthick.creds"
+	cfg.NATSURL = "nats://localhost:4222"
+	// cfg.NATSCredentials = "NGS-Karthick-karthick.creds"
 
-	if cfg.NATSURL == "" || cfg.NATSCredentials == "" {
+	if cfg.NATSURL == "" {
 		log.Fatal("Critical configuration is missing")
 	}
 

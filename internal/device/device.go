@@ -10,69 +10,76 @@ import (
 	"mime/multipart"
 
 	"github.com/menderdevicesconsumer/internal/api"
-	"github.com/menderdevicesconsumer/internal/auth"
-	"github.com/menderdevicesconsumer/internal/http"
+	httpclient "github.com/menderdevicesconsumer/internal/http"
 	"github.com/nats-io/nats.go/jetstream"
-
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 )
 
-func GetDeviceList(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
-	creds, err := ParseCredentials(msg)
-	if err != nil {
-		log.Printf("Failed to parse credentials: %v", err)
-		return "", err
-	}
-
-	log.Print(creds.Domain)
-	log.Printf("Received Request: %s", creds.RequestId)
-	token, err := creds.AuthenticateWithContext(ctx)
-	if err != nil {
-		log.Printf("Failed to authenticate: %v", err)
-		return "", err
-	}
-	api := api.GetInstance()
-	client := http.NewClient()
-
-	apiURL := "https://" + creds.Domain + api.API.V2uriDevices
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		log.Printf("Failed to create API request: %v", err)
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send API request: %v", err)
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Failed to read API response body: %v", err)
-		return "", err
-	}
-
-	_, err = js.Publish(ctx, "device.listDeviceResponse."+creds.RequestId, []byte(body))
-	if err != nil {
-		log.Printf("Failed to publish response%v", err)
-	}
-
-	return string(body), nil
+type Request struct {
+	RequestId string `json:"requestId"`
+	Token     string `json:"token"`
+	Domain    string `json:"domain"`
 }
 
 type DeviceData struct {
 	MAC string `json:"mac"`
-	DyngateId string `json:"dyngateId`
+	// DyngateId string `json:"dyngateId"`
 }
 
 type PreauthorizeDeviceRequest struct {
-	DeviceData  DeviceData   `json:"identity_data"`
-	Pubkey      string       `json:"pubkey"`
-	RequestData auth.Request `json:"request_data"`
+	DeviceData  DeviceData `json:"identity_data"`
+	Pubkey      string     `json:"pubkey"`
+	RequestData Request    `json:"request_data"`
+}
+
+func ParseRequest(msg jetstream.Msg) (*Request, error) {
+	var request Request
+	err := json.Unmarshal(msg.Data(), &request)
+	if err != nil {
+		log.Printf("Failed to parse request: %v", err)
+		return nil, err
+	}
+	return &request, nil
+}
+
+func PerformAPIRequest(ctx context.Context, method, apiURL, token string, body io.Reader) ([]byte, error) {
+	client := httpclient.NewClient()
+	req, err := httpclient.NewRequestWithContext(ctx, method, apiURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	return io.ReadAll(resp.Body)
+}
+
+func HandleAPIRequest(ctx context.Context, js jetstream.JetStream, req Request, apiRoute, responseSubject, method string, requestBody io.Reader) (string, error) {
+	log.Printf("Received Request: %s", req.RequestId)
+	apiURL := "https://" + req.Domain + apiRoute
+	body, err := PerformAPIRequest(ctx, method, apiURL, req.Token, requestBody)
+	if err != nil {
+		log.Printf("Failed to make API request: %v", err)
+		return "", err
+	}
+
+	js.Publish(ctx, responseSubject+req.RequestId, body)
+
+	return string(body), nil
+}
+
+func GetDeviceList(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
+	apiConfig := api.GetConfig()
+	req, _ := ParseRequest(msg)
+
+	return HandleAPIRequest(ctx, js, *req, apiConfig.API.V2uriDevices, "device.listDeviceResponse.", "GET", nil)
 }
 
 func ParseDeviceInfoRequest(msg jetstream.Msg) (*PreauthorizeDeviceRequest, error) {
@@ -88,19 +95,9 @@ func ParseDeviceInfoRequest(msg jetstream.Msg) (*PreauthorizeDeviceRequest, erro
 func PreauthorizeDevice(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
 	request, err := ParseDeviceInfoRequest(msg)
 	if err != nil {
-		log.Printf("Failed to parse credentials: %v", err)
-		return "", err
+		log.Printf("Unable to parse request: %v", err)
 	}
-
-	log.Print(request.RequestData.Domain)
-	log.Printf("Received Request: %s", request.RequestData.RequestId)
-	token, err := request.RequestData.AuthenticateWithContext(ctx)
-	if err != nil {
-		log.Printf("Failed to authenticate: %v", err)
-		return "", err
-	}
-	api := api.GetInstance()
-	client := http.NewClient()
+	apiConfig := api.GetConfig()
 
 	payload := struct {
 		DeviceData DeviceData `json:"identity_data"`
@@ -118,36 +115,7 @@ func PreauthorizeDevice(ctx context.Context, js jetstream.JetStream, msg jetstre
 
 	identityDataReader := bytes.NewReader(deviceData)
 
-	apiURL := "https://" + request.RequestData.Domain + api.API.V2uriDevices
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, identityDataReader)
-	if err != nil {
-		log.Printf("Failed to create API request: %v", err)
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send API request: %v", err)
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Printf("Failed to read API response body: %v", err)
-		return "", err
-	}
-
-	_, err = js.Publish(ctx, "device.preauthorizeDeviceResponse."+request.RequestData.RequestId, []byte(body))
-	if err != nil {
-		log.Printf("Failed to publish response%v", err)
-	}
-	log.Print(resp.Header.Get("Location"))
-	log.Print(resp.Status)
-	log.Print(string(body))
-
-	return string(body), nil
+	return HandleAPIRequest(ctx, js, request.RequestData, apiConfig.API.V2uriDevices, "device.preauthorizeDeviceResponse.", "POST", identityDataReader)
 }
 
 type Artifact struct {
@@ -156,7 +124,7 @@ type Artifact struct {
 }
 
 type UploadArtifactRequest struct {
-	AuthRequest  auth.Request
+	AuthRequest  Request
 	BlobMetadata Artifact
 }
 
@@ -274,3 +242,4 @@ func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.M
 
 	return "Blob uploaded successfully", nil
 }
+

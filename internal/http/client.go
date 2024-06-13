@@ -16,7 +16,7 @@ func NewClient() *http.Client {
 	return &http.Client{
 		Timeout: time.Minute * 10,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
 }

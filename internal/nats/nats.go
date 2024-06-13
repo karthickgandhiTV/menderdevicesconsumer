@@ -9,8 +9,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-func Connect(url, credentials string) (*nats.Conn, error) {
-	nc, err := nats.Connect(url, nats.UserCredentials(credentials), nats.Name("Mender Producer"))
+func Connect(url string) (*nats.Conn, error) {
+	nc, err := nats.Connect(url, nats.Name("Mender Producer"))
 	if err != nil {
 		return nil, err
 	}

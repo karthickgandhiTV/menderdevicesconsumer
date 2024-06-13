@@ -8,16 +8,17 @@ import (
 
 	"github.com/menderdevicesconsumer/internal/api"
 	"github.com/menderdevicesconsumer/internal/http"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
-type Request struct {
+type LoginRequest struct {
 	RequestId string `json:"requestId"`
 	Email     string `json:"email"`
 	Password  string `json:"password"`
 	Domain    string `json:"domain"`
 }
 
-func (creds Request) AuthenticateWithContext(ctx context.Context) (string, error) {
+func (creds *LoginRequest) AuthenticateWithContext(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
 	encodedCreds := base64.StdEncoding.EncodeToString([]byte(creds.Email + ":" + creds.Password))
 	headers := map[string][]string{
 		"Content-Type":  {"application/json"},
@@ -25,7 +26,7 @@ func (creds Request) AuthenticateWithContext(ctx context.Context) (string, error
 		"Authorization": {"Basic " + encodedCreds},
 	}
 	client := http.NewClient()
-	api := api.GetInstance()
+	api := api.GetConfig()
 
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://"+creds.Domain+api.API.AuthLogin, nil)
 	for key, value := range headers {
@@ -49,6 +50,8 @@ func (creds Request) AuthenticateWithContext(ctx context.Context) (string, error
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("authentication failed with status %d: %s", resp.StatusCode, string(body))
 	}
+
+	js.Publish(ctx, "user.loginResponse."+creds.RequestId, []byte(body))
 
 	return string(body), nil
 }

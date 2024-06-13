@@ -21,7 +21,7 @@ type APIConfig struct {
 var instance *Config
 var once sync.Once
 
-func GetInstance() *Config {
+func GetConfig() *Config {
 	once.Do(func() {
 		instance = &Config{
 			API: APIConfig{
