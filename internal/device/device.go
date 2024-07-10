@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
+	"fmt"
 
 	"github.com/menderdevicesconsumer/internal/api"
 	httpclient "github.com/menderdevicesconsumer/internal/http"
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -41,45 +41,56 @@ func ParseRequest(msg jetstream.Msg) (*Request, error) {
 	return &request, nil
 }
 
-func PerformAPIRequest(ctx context.Context, method, apiURL, token string, body io.Reader) ([]byte, error) {
+func PerformAPIRequest(ctx context.Context, method, apiURL, token string, body io.Reader) ([]byte, error, int) {
 	client := httpclient.NewClient()
 	req, err := httpclient.NewRequestWithContext(ctx, method, apiURL, body)
 	if err != nil {
-		return nil, err
+		return nil, err, 1
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, err, 1
 	}
 	defer resp.Body.Close()
 
-	return io.ReadAll(resp.Body)
+	response, _ := io.ReadAll(resp.Body)
+
+	return response, nil, resp.StatusCode
 }
 
-func HandleAPIRequest(ctx context.Context, js jetstream.JetStream, req Request, apiRoute, responseSubject, method string, requestBody io.Reader) (string, error) {
+func HandleAPIRequest(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, apiRoute, responseSubject, method string, body io.Reader) (string, error) {
+	req, err := ParseRequest(msg)
+	if err != nil {
+		return "", err
+	}
+
 	log.Printf("Received Request: %s", req.RequestId)
 	apiURL := "https://" + req.Domain + apiRoute
-	body, err := PerformAPIRequest(ctx, method, apiURL, req.Token, requestBody)
+	resp, err, StatusCode := PerformAPIRequest(ctx, method, apiURL, req.Token, body)
 	if err != nil {
 		log.Printf("Failed to make API request: %v", err)
 		return "", err
 	}
-
-	js.Publish(ctx, responseSubject+req.RequestId, body)
-
-	return string(body), nil
+	log.Print(string(resp))
+	log.Print(responseSubject + req.RequestId)
+	responseMsg := nats.NewMsg(responseSubject + req.RequestId)
+	responseMsg.Header.Set("StatusCode", fmt.Sprint(StatusCode))
+	responseMsg.Data = append(responseMsg.Data, resp...)
+	fmt.Println(responseMsg.Header.Get("StatusCode"))
+	_, err = js.PublishMsgAsync(responseMsg)
+	log.Print(err)
+	if err != nil {
+		log.Printf("Failed to publish : %v", err)
+	}
+	return string(resp), nil
 }
 
 func GetDeviceList(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
 	apiConfig := api.GetConfig()
-	req, _ := ParseRequest(msg)
-
-	return HandleAPIRequest(ctx, js, *req, apiConfig.API.V2uriDevices, "device.listDeviceResponse.", "GET", nil)
+	return HandleAPIRequest(ctx, js, msg, apiConfig.API.V2uriDevices, "device.listDeviceResponse.", "GET", nil)
 }
 
 func ParseDeviceInfoRequest(msg jetstream.Msg) (*PreauthorizeDeviceRequest, error) {
@@ -115,131 +126,10 @@ func PreauthorizeDevice(ctx context.Context, js jetstream.JetStream, msg jetstre
 
 	identityDataReader := bytes.NewReader(deviceData)
 
-	return HandleAPIRequest(ctx, js, request.RequestData, apiConfig.API.V2uriDevices, "device.preauthorizeDeviceResponse.", "POST", identityDataReader)
+	return HandleAPIRequest(ctx, js, msg , apiConfig.API.V2uriDevices, "device.preauthorizeDeviceResponse.", "POST", identityDataReader)
 }
 
-type Artifact struct {
-	ContainerName string
-	BlobName      string
+
+func AcceptDevice(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg){
+
 }
-
-type UploadArtifactRequest struct {
-	AuthRequest  Request
-	BlobMetadata Artifact
-}
-
-func ParseUploadArtifactRequest(msg jetstream.Msg) (*UploadArtifactRequest, error) {
-	var request UploadArtifactRequest
-	err := json.Unmarshal(msg.Data(), &request)
-	if err != nil {
-		log.Printf("Failed to parse credentials: %v", err)
-		return nil, err
-	}
-	return &request, nil
-}
-
-func UploadArtifact(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
-	request, err := ParseUploadArtifactRequest(msg)
-	if err != nil {
-		log.Printf("Failed to parse credentials: %v", err)
-		return "", err
-	}
-
-	log.Print(request.AuthRequest.Domain)
-	log.Printf("Received Request: %s", request.AuthRequest.RequestId)
-	token, err := request.AuthRequest.AuthenticateWithContext(ctx)
-	if err != nil {
-		log.Printf("Failed to authenticate: %v", err)
-		return "", err
-	}
-
-	url := "https://menderartifactstorage.blob.core.windows.net/"
-
-	credential, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		log.Printf("Failed to crate default Credential: %v", err)
-		return "", err
-	}
-
-	serviceClient, err := azblob.NewClient(url, credential, nil)
-	if err != nil {
-		log.Printf("Failed to create service client: %v", err)
-		return "", err
-	}
-
-	downloadResponse, err := serviceClient.DownloadStream(ctx, request.BlobMetadata.ContainerName, request.BlobMetadata.BlobName, nil)
-	if err != nil {
-		log.Printf("Failed to start blob download: %v", err)
-		return "", err
-	}
-
-	reader, writer := io.Pipe()
-	multipartWriter := multipart.NewWriter(writer)
-
-	go func() {
-		defer writer.Close()
-		defer downloadResponse.Body.Close()
-
-		metaPart, err := multipartWriter.CreateFormField("description")
-		if err != nil {
-			log.Printf("Failed to create metadata part: %v", err)
-			writer.CloseWithError(err)
-			return
-		}
-		_, err = metaPart.Write([]byte("Artifact description"))
-		if err != nil {
-			log.Printf("Failed to write to metadata part: %v", err)
-			writer.CloseWithError(err)
-			return
-		}
-
-		artifactPart, err := multipartWriter.CreateFormFile("artifact", request.BlobMetadata.ContainerName)
-		if err != nil {
-			log.Printf("Failed to create form file for artifact: %v", err)
-			writer.CloseWithError(err)
-			return
-		}
-
-		if _, err = io.Copy(artifactPart, downloadResponse.Body); err != nil {
-			log.Printf("Failed to copy blob data to form file: %v", err)
-			writer.CloseWithError(err)
-			return
-		}
-
-		if err := multipartWriter.Close(); err != nil {
-			log.Printf("Failed to close multipart writer: %v", err)
-			writer.CloseWithError(err)
-			return
-		}
-	}()
-
-	client := http.NewClient()
-	apiURL := "https://" + request.AuthRequest.Domain + "/api/management/v1/deployments/artifacts"
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, reader)
-	if err != nil {
-		log.Printf("Failed to create request: %v", err)
-		return "", err
-	}
-
-	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+token)
-	log.Print("Sending request")
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("Failed to send request: %v", err)
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	responseBody, _ := io.ReadAll(resp.Body)
-	log.Print(string(responseBody))
-	log.Printf("StatusCode: %v", resp.StatusCode)
-
-	if resp.StatusCode != 201 {
-		log.Printf("Failed to upload blob, server responded with status: %v", resp.StatusCode)
-		return "", fmt.Errorf("upload failed with status: %d", resp.StatusCode)
-	}
-
-	return "Blob uploaded successfully", nil
-}
-
