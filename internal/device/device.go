@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
-	"fmt"
 
 	"github.com/menderdevicesconsumer/internal/api"
 	httpclient "github.com/menderdevicesconsumer/internal/http"
@@ -31,6 +31,12 @@ type PreauthorizeDeviceRequest struct {
 	RequestData Request    `json:"request_data"`
 }
 
+type AcceptDeviceRequest struct {
+	Deviceid    string  `json:"deviceId"`
+	AuthsetId   string  `json:"authSetId"`
+	RequestData Request `json:"request_data"`
+}
+
 func ParseRequest(msg jetstream.Msg) (*Request, error) {
 	var request Request
 	err := json.Unmarshal(msg.Data(), &request)
@@ -41,6 +47,27 @@ func ParseRequest(msg jetstream.Msg) (*Request, error) {
 	return &request, nil
 }
 
+func ParseDeviceInfoRequest(msg jetstream.Msg) (*PreauthorizeDeviceRequest, error) {
+	var deviceInfoReq PreauthorizeDeviceRequest
+	err := json.Unmarshal(msg.Data(), &deviceInfoReq)
+	if err != nil {
+		log.Printf("Failed to parse device info request: %v", err)
+		return nil, err
+	}
+	return &deviceInfoReq, nil
+}
+
+func ParseAcceptDeviceRequest(msg jetstream.Msg) (*AcceptDeviceRequest, error) {
+	var acceptDeviceReq AcceptDeviceRequest
+	err := json.Unmarshal(msg.Data(), &acceptDeviceReq)
+	if err != nil {
+		log.Printf("Failed to parse accept device request: %v", err)
+		return nil, err
+	}
+	return &acceptDeviceReq, nil
+}
+
+// PerformAPIRequest sends an HTTP request to the specified API endpoint and returns the response body and status code.
 func PerformAPIRequest(ctx context.Context, method, apiURL, token string, body io.Reader) ([]byte, error, int) {
 	client := httpclient.NewClient()
 	req, err := httpclient.NewRequestWithContext(ctx, method, apiURL, body)
@@ -61,12 +88,7 @@ func PerformAPIRequest(ctx context.Context, method, apiURL, token string, body i
 	return response, nil, resp.StatusCode
 }
 
-func HandleAPIRequest(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg, apiRoute, responseSubject, method string, body io.Reader) (string, error) {
-	req, err := ParseRequest(msg)
-	if err != nil {
-		return "", err
-	}
-
+func HandleAPIRequest(ctx context.Context, js jetstream.JetStream, req Request, apiRoute, responseSubject, method string, body io.Reader) (string, error) {
 	log.Printf("Received Request: %s", req.RequestId)
 	apiURL := "https://" + req.Domain + apiRoute
 	resp, err, StatusCode := PerformAPIRequest(ctx, method, apiURL, req.Token, body)
@@ -90,17 +112,9 @@ func HandleAPIRequest(ctx context.Context, js jetstream.JetStream, msg jetstream
 
 func GetDeviceList(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
 	apiConfig := api.GetConfig()
-	return HandleAPIRequest(ctx, js, msg, apiConfig.API.V2uriDevices, "device.listDeviceResponse.", "GET", nil)
-}
+	req, _ := ParseRequest(msg)
 
-func ParseDeviceInfoRequest(msg jetstream.Msg) (*PreauthorizeDeviceRequest, error) {
-	var deviceInfoReq PreauthorizeDeviceRequest
-	err := json.Unmarshal(msg.Data(), &deviceInfoReq)
-	if err != nil {
-		log.Printf("Failed to parse device info request: %v", err)
-		return nil, err
-	}
-	return &deviceInfoReq, nil
+	return HandleAPIRequest(ctx, js, *req, apiConfig.API.V2uriDevices, "device.listDeviceResponse.", "GET", nil)
 }
 
 func PreauthorizeDevice(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
@@ -126,10 +140,57 @@ func PreauthorizeDevice(ctx context.Context, js jetstream.JetStream, msg jetstre
 
 	identityDataReader := bytes.NewReader(deviceData)
 
-	return HandleAPIRequest(ctx, js, msg , apiConfig.API.V2uriDevices, "device.preauthorizeDeviceResponse.", "POST", identityDataReader)
+	return HandleAPIRequest(ctx, js, request.RequestData, apiConfig.API.V2uriDevices, "device.preauthorizeDeviceResponse.", "POST", identityDataReader)
 }
 
+func AcceptDevice(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
+	request, err := ParseAcceptDeviceRequest(msg)
+	if err != nil {
+		log.Printf("Unable to parse request: %v", err)
+	}
 
-func AcceptDevice(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg){
+	apiConfig := api.GetConfig()
+
+	payload := struct {
+		Status string `json:"status"`
+	}{
+		Status: "accepted",
+	}
+
+	statusData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Failed to parse status data: %v", err)
+		return "", err
+	}
+
+	statusDataReader := bytes.NewReader(statusData)
+
+	return HandleAPIRequest(ctx, js, request.RequestData, apiConfig.API.V2uriDevices+"/"+request.Deviceid+"/auth/"+request.AuthsetId+"/status", "device.acceptDeviceResponse.", "PUT", statusDataReader)
+
+}
+
+func RejectDevice(ctx context.Context, js jetstream.JetStream, msg jetstream.Msg) (string, error) {
+	request, err := ParseAcceptDeviceRequest(msg)
+	if err != nil {
+		log.Printf("Unable to parse request: %v", err)
+	}
+
+	apiConfig := api.GetConfig()
+
+	payload := struct {
+		Status string `json:"status"`
+	}{
+		Status: "rejected",
+	}
+
+	statusData, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Failed to parse status data: %v", err)
+		return "", err
+	}
+
+	statusDataReader := bytes.NewReader(statusData)
+
+	return HandleAPIRequest(ctx, js, request.RequestData, apiConfig.API.V2uriDevices+"/"+request.Deviceid+"/auth/"+request.AuthsetId+"/status", "device.rejectDeviceResponse.", "PUT", statusDataReader)
 
 }

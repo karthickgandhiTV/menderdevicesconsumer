@@ -39,6 +39,23 @@ func handleRequest(js jetstream.JetStream, msg jetstream.Msg) {
 			msg.Ack()
 
 		}
+
+	case "device.acceptDevice.>":
+		_, err := device.AcceptDevice(ctx, js, msg)
+		if err != nil {
+			log.Printf("Failed to accept device: %v", err)
+			msg.Ack()
+
+		}
+
+	case "device.rejectDevice.>":
+		_, err := device.RejectDevice(ctx, js, msg)
+		if err != nil {
+			log.Printf("Failed to accept device: %v", err)
+			msg.Ack()
+
+		}
+
 	}
 
 }
